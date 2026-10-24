@@ -33,7 +33,7 @@ function rect(left, top, width, height) {
 }
 
 /** Build the composer DOM InputBar renders, with jsdom-friendly geometry. */
-function buildComposer(dom, { stop, draft }) {
+function buildComposer(dom, { stop, draft, sessionAttr, misplacedPrimary = false }) {
 	const { document } = dom.window;
 	const card = document.createElement('div');
 	card.setAttribute('data-composer-card', '');
@@ -70,12 +70,19 @@ function buildComposer(dom, { stop, draft }) {
 	primary.innerHTML = stop
 		? '<svg viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10"></rect></svg>'
 		: '<svg viewBox="0 0 16 16"><path d="M8 1L8 15"></path></svg>';
-	primary.getBoundingClientRect = () => rect(750, 470, 32, 32);
+	primary.getBoundingClientRect = () => (misplacedPrimary ? rect(40, 410, 32, 32) : rect(750, 470, 32, 32));
 	trailing.appendChild(primary);
 
 	row.appendChild(trailing);
 	card.appendChild(row);
-	document.body.appendChild(card);
+	if (sessionAttr === undefined) {
+		document.body.appendChild(card);
+	} else {
+		const holder = document.createElement('div');
+		holder.setAttribute('data-conversation-session', sessionAttr);
+		holder.appendChild(card);
+		document.body.appendChild(holder);
+	}
 	return { card, overlay, editor, primary, plus };
 }
 
@@ -84,7 +91,7 @@ function buildComposer(dom, { stop, draft }) {
  * the DOM handles the tests drive.
  */
 async function loadPlugin(options = {}) {
-	const { stop = true, draft = '', settings = {} } = options;
+	const { stop = true, draft = '', settings = {}, sessionAttr, misplacedPrimary = false } = options;
 	const dom = new JSDOM('<!doctype html><html><body></body></html>', {
 		url: 'http://127.0.0.1/',
 		pretendToBeVisual: true,
@@ -112,7 +119,8 @@ async function loadPlugin(options = {}) {
 		dom.window.localStorage.setItem('dsh-throwtomatoes:settings:v1', JSON.stringify(settings));
 	}
 
-	const composer = buildComposer(dom, { stop, draft });
+	const composer = buildComposer(dom, { stop, draft, sessionAttr, misplacedPrimary });
+	const seatProps = 'seatProps' in options ? options.seatProps : { sessionId: 'session-test' };
 
 	let pendingEffects = [];
 	const renderComponent = (component, props) => {
@@ -178,7 +186,7 @@ async function loadPlugin(options = {}) {
 	const session = {
 		prompt: async (content, mode) => { calls.prompt.push({ content, mode }); return { ok: true }; },
 		cancel: async () => { calls.cancel += 1; return { ok: true }; },
-		getSnapshot: () => ({ running: false }),
+		getSnapshot: () => ({ running: stop }),
 	};
 	const registered = [];
 	const slotsApi = {
@@ -201,7 +209,7 @@ async function loadPlugin(options = {}) {
 	const tomatoKey = dom.window.document.querySelector('.dtt-key');
 	const seatSlot = registered.find((entry) => entry.name === 'conversation.input.overlay');
 	const seat = seatSlot.slot.component !== undefined
-		? renderComponent(seatSlot.slot.component, { sessionId: 'session-test' })
+		? renderComponent(seatSlot.slot.component, seatProps)
 		: { cleanup: () => {} };
 
 	return {
@@ -332,4 +340,24 @@ test('respects the effects switch', async () => {
 	await sleep(30);
 	assert.equal(plugin.layer(), null, 'no effect layer when effects are disabled');
 	assert.equal(plugin.tomatoKey.querySelector('.dtt-badge').textContent, '1', 'the press still counts');
+});
+
+test('resolves the session from the conversation DOM when no sessionId prop arrives', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '', sessionAttr: 'session-from-dom', seatProps: {} });
+	active = plugin;
+	await sleep(30);
+	assert.equal(plugin.tomatoKey.dataset.visible, 'true', 'the key still reveals itself without the prop');
+	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(1150);
+	assert.equal(plugin.calls.prompt.length, 1, 'the reminder still reaches a session');
+});
+
+test('falls back to the composer corner when the primary key cannot be located', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '', misplacedPrimary: true });
+	active = plugin;
+	await sleep(30);
+	assert.equal(plugin.tomatoKey.dataset.visible, 'true');
+	assert.equal(plugin.tomatoKey.style.left, '778px');
+	assert.equal(plugin.tomatoKey.style.top, '508px');
+	assert.equal(plugin.tomatoKey.style.width, '34px');
 });
