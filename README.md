@@ -59,8 +59,9 @@ dsh plugin add github:<你的账号>/dsh-throwtomatoes-plugin
 ## 实现要点
 
 - 浏览器半边（`lib/client.js`）按 DSH 客户端模块系统约定注册为 lazy-CJS factory：`window.__ModuleLoader__.load({ id, factory })`，不依赖打包器注入的 `import`。
-- 通过 `slots.inject('conversation.input.overlay', …)` 挂一个不可见的「座位」组件，读 `props.sessionId` 并把 `[data-composer-card]` 和会话 id 关联起来。
-- 主键定位：取 composer card 内最后一个 `<button>`，并用几何校验（位于卡片右下、尺寸合理）确认它是主键；用 SVG 里有没有 `<rect>` 判断它当前是「停止」还是「发送」。
+- 通过 `slots.inject('conversation.input.overlay', …)` 挂一个不可见的「座位」组件，把 `[data-composer-card]` 和会话 id 关联起来；会话 id 先取 `props.sessionId`，拿不到时退回读卡片的 `[data-conversation-session]` 祖先属性，所以 slot 契约变化时插件不会失联。
+- 「是否正在跑任务」优先读会话快照的 `running`；拿不到快照时退回看主键 SVG 里有没有 `<rect>`（停止图标）。
+- 主键定位：取 composer card 内最后一个 `<button>`，并用几何校验（位于卡片右下、尺寸合理）确认它是主键；万一未来布局改动导致定位失败，番茄键会退到卡片右下角固定位置，功能不中断。
 - 投递：优先 `ctx.get('sessions').binding(sessionId).session.prompt(content, 'queue')` / `.cancel()`；服务不可用时退回 `ctx.get('remote').session.prompt(...)`。
 - 设置页通过 `slots.inject('settings.section', …)` 注册，计数与开关存在 `localStorage`。
 
@@ -71,7 +72,7 @@ pnpm install
 node --test test/*.test.mjs
 ```
 
-测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle，覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔的投递与警告文案、可重复使用、特效开关。
+测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle，覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔的投递与警告文案、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化。
 
 ## License
 
