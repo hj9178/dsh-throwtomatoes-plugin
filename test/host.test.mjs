@@ -98,12 +98,15 @@ function post(route, body) {
 }
 
 /**
- * Run the registered pre-step waterfall once with the payload the agent loop
- * really sends: `{ messages, turn, step, signal }` — no agent reference.
+ * Run the registered pre-step waterfall once.
+ *
+ * The loop calls it with `{ messages, turn, step, signal }`, and the agent
+ * dispatcher fuses `agent` into every agent event, so the handler really does
+ * see the agent that is entering the step.
  */
-async function step(preStep, messages = [], position = { turn: 1, step: 1 }) {
+async function step(preStep, agent, messages = [], position = { turn: 1, step: 1 }) {
 	const next = () => Promise.resolve({ kind: 'enter', messages });
-	return preStep.fn({ messages, ...position, signal: { aborted: false } }, next);
+	return preStep.fn({ messages, ...position, agent, signal: { aborted: false } }, next);
 }
 
 test('registers one prefix route and the pre-step hook', () => {
@@ -125,7 +128,7 @@ test('a light throw arms a request-visible reminder without sending a user promp
 	assert.equal(agent.calls.cancel.length, 0, 'light throw must not interrupt');
 	assert.equal(agent.calls.followup, 0, 'the notice must not be sent as a user message');
 
-	const decision = await step(preStep);
+	const decision = await step(preStep, agent);
 	assert.equal(decision.messages.length, 1);
 	const injected = decision.messages[0];
 	assert.equal(injected.role, 'user');
@@ -144,9 +147,9 @@ test('the reminder is one-shot: the following step carries nothing extra', async
 	const { route, preStep } = mount(agent);
 	post(route, { sessionId: agent.id, hits: 2 });
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	const first = await step(preStep);
+	const first = await step(preStep, agent);
 	assert.equal(first.messages.length, 1);
-	const second = await step(preStep);
+	const second = await step(preStep, agent);
 	assert.equal(second.messages.length, 0);
 });
 
@@ -159,7 +162,7 @@ test('a heavy throw interrupts the running turn and restarts it with the reminde
 	assert.deepEqual(res.body(), { ok: true, heavy: true, stopped: true });
 	assert.equal(agent.calls.cancel.length, 1);
 	assert.equal(agent.calls.wake.length, 1, 'the interrupted turn is restarted so the model can reflect');
-	const decision = await step(preStep);
+	const decision = await step(preStep, agent);
 	assert.equal(decision.messages.length, 1);
 	assert.match(decision.messages[0].content[0].text, /已经强行中断/);
 });
@@ -180,7 +183,7 @@ test('the tomato feature can be used again in the same conversation', async () =
 	for (const hits of [1, 1, 3]) {
 		post(route, { sessionId: agent.id, hits });
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		const decision = await step(preStep);
+		const decision = await step(preStep, agent);
 		assert.equal(decision.messages.length, 1, `throw ${hits} should inject once`);
 	}
 	assert.equal(agent.calls.wake.length, 3);
@@ -188,18 +191,22 @@ test('the tomato feature can be used again in the same conversation', async () =
 
 test('the reminder only lands on the armed agent, never on another turn', async () => {
 	const armed = makeAgent({ id: 'session-a' });
+	const other = makeAgent({ id: 'session-b' });
 	const { route, preStep } = mount(armed);
 	post(route, { sessionId: armed.id, hits: 1 });
 	await new Promise((resolve) => setTimeout(resolve, 0));
+	// A different conversation sitting at the same turn/step must not steal it.
+	const stolen = await step(preStep, other);
+	assert.equal(stolen.messages.length, 0);
 	// Another turn (e.g. a different conversation that happens to be at turn 7)
 	// must not claim it.
-	const elsewhere = await step(preStep, [], { turn: 7, step: 1 });
+	const elsewhere = await step(preStep, armed, [], { turn: 7, step: 1 });
 	assert.equal(elsewhere.messages.length, 0);
 	// A non-first step of the same turn must not claim it either.
-	const laterStep = await step(preStep, [], { turn: 1, step: 2 });
+	const laterStep = await step(preStep, armed, [], { turn: 1, step: 2 });
 	assert.equal(laterStep.messages.length, 0);
 	// The armed turn still gets it afterwards.
-	const mine = await step(preStep, [], { turn: 1, step: 1 });
+	const mine = await step(preStep, armed, [], { turn: 1, step: 1 });
 	assert.equal(mine.messages.length, 1);
 });
 
