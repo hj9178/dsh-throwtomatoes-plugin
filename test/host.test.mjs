@@ -256,3 +256,35 @@ test('malformed bodies are rejected and non-POST verbs are refused', async () =>
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.equal(res.statusCode, 405);
 });
+
+test('a second throw folds into the reminder that is still waiting', async () => {
+	const agent = makeAgent({ status: 'running' });
+	const { route, preStep } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	// A heavy throw lands before the model ever saw the light one: the second
+	// reminder must not overwrite the first promise (the model would otherwise
+	// get a mild note right after its turn had been killed).
+	post(route, { sessionId: agent.id, hits: 3 });
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	const decision = await step(preStep, agent);
+	assert.equal(decision.messages.length, 1, 'only one reminder is delivered');
+	const text = decision.messages[0].content[0].text;
+	assert.match(text, /4 个番茄/, 'the presses are counted together');
+	assert.match(text, /中断/, 'the heavier flavour wins');
+});
+
+test('a waiting reminder is dropped once the loop cannot open a turn', async () => {
+	const agent = makeAgent({ status: 'running' });
+	// The wake is accepted by the API but the phase never opens (an abort keeps
+	// owning it). The retries give up and the reminder must not linger until the
+	// user's own next question picks it up.
+	agent.wakeDriver = () => { agent.calls.wake.push(Date.now()); };
+	const { route, preStep } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await new Promise((resolve) => setTimeout(resolve, 3400));
+
+	const decision = await step(preStep, agent, [], { turn: 2, step: 1 });
+	assert.equal(decision.messages.length, 0);
+});

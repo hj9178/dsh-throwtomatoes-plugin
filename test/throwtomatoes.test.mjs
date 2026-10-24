@@ -455,4 +455,40 @@ test('an unreachable host bridge fails quietly instead of posting a visible mess
 	// plugin must not add to the conversation.
 	assert.equal(plugin.calls.prompt.length, 0);
 	assert.equal(plugin.tomatoKey.dataset.failed, 'true', 'the key flags the failed delivery');
+	assert.equal(plugin.dom.window.localStorage.getItem('dsh-throwtomatoes:count:v1'), null,
+		'a refused throw must not inflate the counter');
+});
+
+test('a throw survives the key hiding inside the streak window', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '' });
+	active = plugin;
+	await sleep(60);
+
+	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
+	// The composer leaves the viewport while the streak window is still open: the
+	// key hides itself and clears its bound seat before the streak flushes.
+	plugin.composer.card.getBoundingClientRect = () => rect(20, -5000, 800, 150);
+	plugin.dom.window.document.dispatchEvent(new plugin.dom.window.Event('input'));
+	await sleep(80);
+	assert.equal(plugin.tomatoKey.dataset.visible, 'false', 'the key must hide once the composer is gone');
+
+	await sleep(1100);
+	assert.equal(plugin.hostCalls.length, 1, 'the captured seat still delivers the throw');
+	assert.equal(plugin.hostCalls[0].body.hits, 1);
+});
+
+test('a throw follows the conversation the composer now shows', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '', sessionAttr: 'session-first' });
+	active = plugin;
+	await sleep(60);
+
+	// Switching conversations swaps the attribute on the ancestor in place, so
+	// the id captured when the seat mounted is the one the user just left.
+	const holder = plugin.composer.card.closest('[data-conversation-session]');
+	holder.setAttribute('data-conversation-session', 'session-second');
+
+	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(1150);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.equal(plugin.hostCalls[0].body.sessionId, 'session-second');
 });
