@@ -1,0 +1,59 @@
+{
+  "name": "dsh-throwtomatoes-plugin",
+  "version": "0.1.0",
+  "description": "Throw tomatoes at the model: while a task is running and the composer is empty, the send key becomes a tomato key",
+  "type": "module",
+  "main": "./lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hj9178/dsh-throwtomatoes-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hj9178/dsh-throwtomatoes-plugin/issues"
+  },
+  "homepage": "https://github.com/hj9178/dsh-throwtomatoes-plugin#readme",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "compatibility": {
+      "dsh": "0.2.1-rc.2",
+      "dshReleases": {
+        "0.2.1-rc.2": "compatible"
+      }
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "tomato",
+    "throw",
+    "feedback"
+  ],
+  "license": "MIT"
+}
