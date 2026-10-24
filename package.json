@@ -1,6 +1,6 @@
 {
   "name": "dsh-throwtomatoes-plugin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Throw tomatoes at the model: while a task is running and the composer is empty, the send key becomes a tomato key; one or three presses interrupt and make the model reflect without adding anything to the visible conversation",
   "type": "module",
   "main": "./lib/index.js",

@@ -61,10 +61,12 @@ dsh plugin add github:<你的账号>/dsh-throwtomatoes-plugin
 插件分两半，职责严格分开：
 
 - **浏览器半边**（`lib/client.js`）：番茄键、特效、音效、设置页。按 DSH 客户端模块系统约定注册为 lazy-CJS factory（`window.__ModuleLoader__.load({ id, factory })`），不依赖打包器注入的 `import`。
-- **宿主半边**（`lib/index.js`）：唯一能碰到运行中 agent 的地方。它在 `/_dsh/throwtomatoes/throw` 上开一个同源 POST 接口，收到「扔了几个、是不是猛扔」之后：
+- **宿主半边**（`lib/index.js`）：唯一能碰到模型请求的地方。它在 `/_dsh/throwtomatoes/throw` 上开一个同源 POST 接口，收到「扔了几个、是不是猛扔」之后：
+  - 把一条提醒**武装**在这个会话上（一次性，120 秒过期）；
   - 猛扔且 agent 正在跑 → `agent.cancel({ kind: 'user' }, { keepInbox: true })`（和输入框自己的停止键同形，已排队的输入不会丢）；
-  - 然后 `agent.followup(notice)` —— `followup` 把消息追加到**下一轮**并唤醒驱动器：轻扔就是「当前任务结束后」，猛扔就是「中断之后立刻」；
-  - `notice` 是一条 `role: 'user'`、`source: { kind: 'runtime-context', form: 'notice' }` 的消息，模型能读到并照做，客户端按既有规则隐藏它。
+  - 等当前这一轮把驱动器让出来（`agent.whenIdle()`）再 `agent.wakeDriver()` 开新的一轮，所以轻扔是「当前任务结束后」、猛扔是「中断之后立刻」；
+  - 新的一轮走到第一步时，`agent/pre-step` waterfall 把提醒**并进这次 LLM 请求的 messages**（`source: { kind: 'runtime-context', form: 'notice' }`）—— `agent-loop` 对 `runtime-context` 来源的请求内消息本来就不 append 会话事件，所以对话流里一个字都不会多；
+  - 所以模型是**在请求里**读到提醒的：不是排队发一条消息、不是 steer、也不占用你的输入。
 
 浏览器半边只发这一个请求，拿不到宿主时（例如只装了客户端）会自动退回旧的可见投递方式，功能不中断。
 
@@ -83,7 +85,7 @@ pnpm install
 node --test test/*.test.mjs
 ```
 
-测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle；宿主半边用桩 `ctx` 驱动路由处理器。覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔发往宿主的载荷、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化、宿主不可达时的回退，以及宿主侧「隐形消息 + 先中断后投递 + 参数校验」。
+测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle；宿主半边用桩 `ctx` 驱动路由处理器和 `agent/pre-step` waterfall。覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔发往宿主的载荷、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化、宿主不可达时的回退，以及宿主侧「请求内注入且不写会话事件 + 一次性 + 先中断后重启 + 参数校验」。
 
 ## License
 
