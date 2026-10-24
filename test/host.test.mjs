@@ -28,6 +28,9 @@ function makeAgent({ id = 'session-1', status = 'running', idle = true } = {}) {
 		},
 		wakeDriver() {
 			calls.wake.push(Date.now());
+			// The real driver opens a turn synchronously, so the agent reads as
+			// running the moment the wake is accepted.
+			agent.status = 'running';
 		},
 		whenIdle() {
 			return idle ? Promise.resolve() : new Promise(() => {});
@@ -208,6 +211,26 @@ test('the reminder only lands on the armed agent, never on another turn', async 
 	// The armed turn still gets it afterwards.
 	const mine = await step(preStep, armed, [], { turn: 1, step: 1 });
 	assert.equal(mine.messages.length, 1);
+});
+
+test('a wake the loop cannot honour yet is retried', async () => {
+	const agent = makeAgent({ status: 'running' });
+	// First wake is refused (an abort still owns the phase), the second opens
+	// the turn. Without the retry the reminder would wait for a natural turn.
+	let refusals = 1;
+	agent.wakeDriver = () => {
+		agent.calls.wake.push(Date.now());
+		if (refusals > 0) {
+			refusals -= 1;
+			agent.status = 'idle';
+			return;
+		}
+		agent.status = 'running';
+	};
+	const { route } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await new Promise((resolve) => setTimeout(resolve, 700));
+	assert.ok(agent.calls.wake.length >= 2, 'the wake is retried until the turn opens');
 });
 
 test('unknown session answers 409 instead of throwing', async () => {
