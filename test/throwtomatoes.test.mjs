@@ -444,14 +444,15 @@ test('falls back to the composer corner when the primary key cannot be located',
 	assert.equal(plugin.tomatoKey.style.width, '34px');
 });
 
-test('falls back to the visible composer path when the host bridge is unreachable', async () => {
+test('an unreachable host bridge fails quietly instead of posting a visible message', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '', failFetch: true });
 	active = plugin;
 	await sleep(60);
 	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	await sleep(1150);
 	assert.equal(plugin.hostCalls.length, 1, 'the bridge was attempted');
-	assert.equal(plugin.calls.prompt.length, 1, 'the visible fallback still delivers the reminder');
-	assert.equal(plugin.calls.prompt[0].mode, 'queue');
-	assert.match(plugin.calls.prompt[0].content[0].text, /扔番茄/);
+	// Never fall back to a queued user prompt: that is precisely what the
+	// plugin must not add to the conversation.
+	assert.equal(plugin.calls.prompt.length, 0);
+	assert.equal(plugin.tomatoKey.dataset.failed, 'true', 'the key flags the failed delivery');
 });

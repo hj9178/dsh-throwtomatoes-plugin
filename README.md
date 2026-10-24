@@ -53,8 +53,10 @@ dsh plugin add github:<你的账号>/dsh-throwtomatoes-plugin
 
 - **不改**你的输入：草稿文本、附件、选区都不碰，插件只读取 `contenteditable` 的 `textContent` 判断是否为空。
 - **不改**模型输出：不接管渲染、不注入消息、不改轨迹。
-- **不在对话里留下任何东西**：提醒由宿主半边直接投递给模型，来源标记为 `runtime-context / notice`，客户端从不把它渲染成一条用户消息。你只会看到番茄飞过去，对话流保持干净。
+- **不在对话里留下任何东西**：提醒由宿主半边并进模型请求本身，来源标记为 `dsh-throwtomatoes / notice`。客户端聊天视图对「来源不是 `user`」的消息一律不渲染，所以你只会看到番茄飞过去，对话流保持干净——既没有排队中的消息，也没有多出来的一行。
 - 番茄键是 `position: fixed` 的覆盖层，盖在原生主键上；按下时 `preventDefault + stopPropagation`，原生按钮收不到这次点击。
+
+一个诚实的取舍：提醒必须成为模型请求的一部分，所以它会以一条「非 `user` 来源」的消息落在会话历史里（客户端不渲染，但导出原始会话记录能看到）。这是宿主插件能做到的、既不假装成你的输入、又能真正影响模型的最小代价。
 
 ## 实现要点
 
@@ -65,10 +67,10 @@ dsh plugin add github:<你的账号>/dsh-throwtomatoes-plugin
   - 把一条提醒**武装**在这个会话上（一次性，120 秒过期）；
   - 猛扔且 agent 正在跑 → `agent.cancel({ kind: 'user' }, { keepInbox: true })`（和输入框自己的停止键同形，已排队的输入不会丢）；
   - 等当前这一轮把驱动器让出来（`agent.whenIdle()`）再 `agent.wakeDriver()` 开新的一轮，所以轻扔是「当前任务结束后」、猛扔是「中断之后立刻」；
-  - 新的一轮走到第一步时，`agent/pre-step` waterfall 把提醒**并进这次 LLM 请求的 messages**（`source: { kind: 'runtime-context', form: 'notice' }`）—— `agent-loop` 对 `runtime-context` 来源的请求内消息本来就不 append 会话事件，所以对话流里一个字都不会多；
+  - 新的一轮走到第一步时，`agent/pre-step` waterfall 把提醒**并进这次 LLM 请求的 messages**（`source: { kind: 'dsh-throwtomatoes', form: 'notice' }`）。这里有一个不能用错的地方：`agent-loop` 会特殊对待 `source.kind === 'runtime-context'` 的消息——它只拿那条消息去触发自带的运行时快照，然后把消息本身丢掉，所以用它注入等于没注入；换成一个普通来源后，这条消息会被记进派生历史，从而真正出现在请求里，而客户端又不会渲染它；
   - 所以模型是**在请求里**读到提醒的：不是排队发一条消息、不是 steer、也不占用你的输入。
 
-浏览器半边只发这一个请求，拿不到宿主时（例如只装了客户端）会自动退回旧的可见投递方式，功能不中断。
+浏览器半边只发这一个请求。宿主不可达时不会退回「发一条可见消息」——那正是这个插件绝不该做的事——而是让番茄键短暂变灰并在控制台留一条警告。
 
 其它细节：
 
@@ -85,7 +87,7 @@ pnpm install
 node --test test/*.test.mjs
 ```
 
-测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle；宿主半边用桩 `ctx` 驱动路由处理器和 `agent/pre-step` waterfall。覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔发往宿主的载荷、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化、宿主不可达时的回退，以及宿主侧「请求内注入且不写会话事件 + 一次性 + 先中断后重启 + 参数校验」。
+测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle；宿主半边用桩 `ctx` 驱动路由处理器和 `agent/pre-step` waterfall。覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔发往宿主的载荷、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化、宿主不可达时不产生可见消息，以及宿主侧「请求内注入且来源不是 `runtime-context` + 一次性 + 先中断后重启 + 参数校验」。
 
 ## License
 

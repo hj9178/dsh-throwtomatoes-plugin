@@ -19,6 +19,9 @@ function makeAgent({ id = 'session-1', status = 'running', idle = true } = {}) {
 		id,
 		session: { id },
 		status,
+		// The agent loop reads `step = phase.step + 1` right before the pre-step
+		// hook, so a first-step hook sees `{ turn, step: 1 }` against step 0 here.
+		phase: { kind: status === 'running' ? 'running' : 'idle', turn: 1, step: 0 },
 		calls,
 		cancel(cause, options) {
 			calls.cancel.push({ cause, options });
@@ -109,7 +112,7 @@ test('registers one prefix route and the pre-step hook', () => {
 	assert.equal(preStep.options?.prepend, true);
 });
 
-test('a light throw arms a request-only reminder and never appends a session event', async () => {
+test('a light throw arms a request-visible reminder without sending a user prompt', async () => {
 	const agent = makeAgent({ status: 'running' });
 	const { route, preStep } = mount(agent);
 	const { res } = post(route, { sessionId: agent.id, hits: 1 });
@@ -123,8 +126,12 @@ test('a light throw arms a request-only reminder and never appends a session eve
 	assert.equal(decision.messages.length, 1);
 	const injected = decision.messages[0];
 	assert.equal(injected.role, 'user');
-	assert.equal(injected.source.kind, 'runtime-context');
+	// `runtime-context` is the one kind the agent loop drops before building the
+	// request, so the reminder must never use it.
+	assert.notEqual(injected.source.kind, 'runtime-context');
+	assert.equal(injected.source.kind, 'dsh-throwtomatoes');
 	assert.equal(injected.source.form, 'notice');
+	assert.equal(typeof injected.id, 'string');
 	assert.match(injected.content[0].text, /扔番茄/);
 	assert.match(injected.content[0].text, /ask_user_question/);
 });
