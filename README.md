@@ -1,6 +1,6 @@
 # dsh-throwtomatoes-plugin
 
-朝模型扔番茄。当模型正在跑任务、而你的输入框是空的时候，输入框右下角的**发送/停止键会变成番茄键**。按下去不会停止任务，也不会发送任何东西——它扔出一个番茄砸向对话区，并让模型停下来反省刚才哪里做错了。
+朝模型扔番茄。当模型正在跑任务、而你的输入框是空的时候，输入框右下角的**发送/停止键会变成番茄键**。按下去不会发送任何东西——它扔出一个番茄砸向对话区，并让模型反省刚才哪里做错了：轻扔等这一轮跑完再说，猛扔当场打断。提醒是宿主侧直接注入给模型的，对话流里看不到任何多出来的消息。
 
 > 兼容 DeepSeek Harness `0.2.1-rc.2`（`dsh.compatibility.dshReleases` 已逐条声明）。
 
@@ -53,16 +53,27 @@ dsh plugin add github:<你的账号>/dsh-throwtomatoes-plugin
 
 - **不改**你的输入：草稿文本、附件、选区都不碰，插件只读取 `contenteditable` 的 `textContent` 判断是否为空。
 - **不改**模型输出：不接管渲染、不注入消息、不改轨迹。
-- 唯一「新增」的对话内容是模型收到一条由番茄键触发的提醒（`mode: 'queue'`），它出现在对话流里，口气是「用户朝你扔了 N 个番茄」。这是需求本身，也是模型能反思的唯一途径。
+- **不在对话里留下任何东西**：提醒由宿主半边直接投递给模型，来源标记为 `runtime-context / notice`，客户端从不把它渲染成一条用户消息。你只会看到番茄飞过去，对话流保持干净。
 - 番茄键是 `position: fixed` 的覆盖层，盖在原生主键上；按下时 `preventDefault + stopPropagation`，原生按钮收不到这次点击。
 
 ## 实现要点
 
-- 浏览器半边（`lib/client.js`）按 DSH 客户端模块系统约定注册为 lazy-CJS factory：`window.__ModuleLoader__.load({ id, factory })`，不依赖打包器注入的 `import`。
+插件分两半，职责严格分开：
+
+- **浏览器半边**（`lib/client.js`）：番茄键、特效、音效、设置页。按 DSH 客户端模块系统约定注册为 lazy-CJS factory（`window.__ModuleLoader__.load({ id, factory })`），不依赖打包器注入的 `import`。
+- **宿主半边**（`lib/index.js`）：唯一能碰到运行中 agent 的地方。它在 `/_dsh/throwtomatoes/throw` 上开一个同源 POST 接口，收到「扔了几个、是不是猛扔」之后：
+  - 猛扔且 agent 正在跑 → `agent.cancel({ kind: 'user' }, { keepInbox: true })`（和输入框自己的停止键同形，已排队的输入不会丢）；
+  - 然后 `agent.followup(notice)` —— `followup` 把消息追加到**下一轮**并唤醒驱动器：轻扔就是「当前任务结束后」，猛扔就是「中断之后立刻」；
+  - `notice` 是一条 `role: 'user'`、`source: { kind: 'runtime-context', form: 'notice' }` 的消息，模型能读到并照做，客户端按既有规则隐藏它。
+
+浏览器半边只发这一个请求，拿不到宿主时（例如只装了客户端）会自动退回旧的可见投递方式，功能不中断。
+
+其它细节：
+
 - 通过 `slots.inject('conversation.input.overlay', …)` 挂一个不可见的「座位」组件，把 `[data-composer-card]` 和会话 id 关联起来；会话 id 先取 `props.sessionId`，拿不到时退回读卡片的 `[data-conversation-session]` 祖先属性，所以 slot 契约变化时插件不会失联。
 - 「是否正在跑任务」优先读会话快照的 `running`；拿不到快照时退回看主键 SVG 里有没有 `<rect>`（停止图标）。
 - 主键定位：取 composer card 内最后一个 `<button>`，并用几何校验（位于卡片右下、尺寸合理）确认它是主键；万一未来布局改动导致定位失败，番茄键会退到卡片右下角固定位置，功能不中断。
-- 投递：优先 `ctx.get('sessions').binding(sessionId).session.prompt(content, 'queue')` / `.cancel()`；服务不可用时退回 `ctx.get('remote').session.prompt(...)`。
+- 显隐完全事件驱动：每张 composer 卡片一个 `MutationObserver`（只看卡片内部属性/子节点变化），加上 `input`/`keyup`/`resize`/`scroll`/`visibilitychange`，用 `requestAnimationFrame` 合并成每帧最多一次；另有一条 1.5 秒的低频兜底。0.1.x 的 180 毫秒轮询会持续强制布局，这一版已移除。
 - 设置页通过 `slots.inject('settings.section', …)` 注册，计数与开关存在 `localStorage`。
 
 ## 开发
@@ -72,7 +83,7 @@ pnpm install
 node --test test/*.test.mjs
 ```
 
-测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle，覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔的投递与警告文案、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化。
+测试用 jsdom 造一个和 InputBar 同构的 composer DOM（含停止态/发送态、空/非空草稿），按 DSH 的方式加载 bundle；宿主半边用桩 `ctx` 驱动路由处理器。覆盖：模块契约、两个 slot 的注册、显隐条件、不转发点击、轻扔/猛扔发往宿主的载荷、可重复使用、特效开关、`sessionId` prop 缺失时的 DOM 兜底、主键定位失败时的角标退化、宿主不可达时的回退，以及宿主侧「隐形消息 + 先中断后投递 + 参数校验」。
 
 ## License
 

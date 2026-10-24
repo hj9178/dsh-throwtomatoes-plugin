@@ -1,20 +1,24 @@
 /**
- * DOM-level tests for dsh-throwtomatoes-plugin's browser half.
+ * Tests for dsh-throwtomatoes-plugin.
  *
- * The plugin is loaded exactly the way the DSH web bundle loads it: a plain
- * script that calls `window.__ModuleLoader__.load({ id, factory })`. The tests
- * then drive a synthetic composer DOM (the same shape InputBar renders) and
- * assert on what the tomato key does.
+ * Browser half: loaded exactly the way the DSH web bundle loads it — a plain
+ * script calling `window.__ModuleLoader__.load({ id, factory })` — then driven
+ * against a synthetic composer DOM (the shape InputBar renders).
+ *
+ * Host half: `apply` is given a stub ctx and its route handler is called with
+ * fake request/response objects, which pins down what the agent receives.
  */
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
 import { JSDOM } from 'jsdom';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const clientPath = path.join(here, '..', 'lib', 'client.js');
+const hostPath = path.join(here, '..', 'lib', 'index.js');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -91,7 +95,7 @@ function buildComposer(dom, { stop, draft, sessionAttr, misplacedPrimary = false
  * the DOM handles the tests drive.
  */
 async function loadPlugin(options = {}) {
-	const { stop = true, draft = '', settings = {}, sessionAttr, misplacedPrimary = false } = options;
+	const { stop = true, draft = '', settings = {}, sessionAttr, misplacedPrimary = false, failFetch = false } = options;
 	const dom = new JSDOM('<!doctype html><html><body></body></html>', {
 		url: 'http://127.0.0.1/',
 		pretendToBeVisual: true,
@@ -154,8 +158,19 @@ async function loadPlugin(options = {}) {
 		useEffect: (effect) => { pendingEffects.push(effect); },
 	};
 
+	const hostCalls = [];
+	const fetchImpl = async (url, init) => {
+		hostCalls.push({ url, body: JSON.parse(init.body), method: init.method });
+		if (failFetch) throw new Error('offline');
+		return {
+			ok: true,
+			status: 200,
+			text: async () => JSON.stringify({ ok: true, heavy: JSON.parse(init.body).heavy, stopped: false }),
+		};
+	};
+
 	const source = await readFile(clientPath, 'utf8');
-	const evaluate = new Function('require', 'window', 'document', 'Element', 'Intl', 'crypto', 'console', source);
+	const evaluate = new Function('require', 'window', 'document', 'Element', 'Intl', 'crypto', 'console', 'fetch', source);
 	let loaded = null;
 
 	dom.window.__ModuleLoader__ = {
@@ -173,6 +188,7 @@ async function loadPlugin(options = {}) {
 		dom.window.Intl,
 		globalThis.crypto,
 		console,
+		fetchImpl,
 	);
 
 	assert.ok(loaded !== null, 'client bundle must call __ModuleLoader__.load');
@@ -216,11 +232,68 @@ async function loadPlugin(options = {}) {
 		dom,
 		composer,
 		calls,
+		hostCalls,
 		registered,
 		dispose: () => { seat.cleanup(); dispose(); },
 		tomatoKey,
 		layer: () => dom.window.document.getElementById('dtt-layer'),
 	};
+}
+
+/* ------------------------------------------------------------------ */
+/* Host half                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Stub ctx that captures the registered route and the agent it resolves. */
+function hostHarness({ running = true } = {}) {
+	const routed = [];
+	let handler = null;
+	const agent = {
+		status: running ? 'running' : 'idle',
+		cancelled: [],
+		messages: [],
+		cancel(cause, options) { this.cancelled.push({ cause, options }); this.status = 'idle'; },
+		followup(message) { this.messages.push(message); },
+	};
+	const ctx = {
+		get: (name) => {
+			if (name === 'webServer') {
+				return {
+					register: (route) => { routed.push(route); handler = route.handler; return () => {}; },
+				};
+			}
+			if (name === 'agents') {
+				return { get: (id) => (id === 'session-host' ? agent : undefined) };
+			}
+			return undefined;
+		},
+		effect: () => {},
+		logger: { warn: () => {} },
+	};
+	return { ctx, agent, routed, handler: () => handler };
+}
+
+function fakeRequest(method, url, body) {
+	const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')];
+	const stream = Readable.from(chunks);
+	stream.method = method;
+	stream.url = url;
+	return stream;
+}
+
+function fakeResponse() {
+	const out = { status: 0, headers: null, body: '' };
+	return {
+		out,
+		writeHead(status, headers) { out.status = status; out.headers = headers; },
+		end(body) { out.body = body ?? ''; },
+	};
+}
+
+async function callHost(harness, method, url, body) {
+	const res = fakeResponse();
+	await harness.handler()(fakeRequest(method, url, body), res);
+	return { status: res.out.status, body: res.out.body.length > 0 ? JSON.parse(res.out.body) : null };
 }
 
 let active = null;
@@ -231,6 +304,10 @@ afterEach(() => {
 		active = null;
 	}
 });
+
+/* ------------------------------------------------------------------ */
+/* Browser half                                                        */
+/* ------------------------------------------------------------------ */
 
 test('exposes the module contract the DSH web bundle expects', async () => {
 	const plugin = await loadPlugin({ stop: false, draft: '' });
@@ -252,14 +329,14 @@ test('registers both surfaces into the slot system', async () => {
 test('keeps the tomato key hidden while the primary key sends', async () => {
 	const plugin = await loadPlugin({ stop: false, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	assert.equal(plugin.tomatoKey.dataset.visible, 'false');
 });
 
 test('reveals the tomato key while a turn runs and the composer is empty', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	assert.equal(plugin.tomatoKey.dataset.visible, 'true');
 	assert.equal(plugin.tomatoKey.style.left, '750px');
 	assert.equal(plugin.tomatoKey.style.top, '470px');
@@ -270,74 +347,78 @@ test('reveals the tomato key while a turn runs and the composer is empty', async
 test('hides the tomato key when the composer has text', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '先别动' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	assert.equal(plugin.tomatoKey.dataset.visible, 'false');
 });
 
 test('never forwards the press to the original primary key', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	let primaryClicks = 0;
 	plugin.composer.primary.addEventListener('click', () => { primaryClicks += 1; });
 	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	assert.equal(primaryClicks, 0, 'the primary key must not receive the tomato press');
 });
 
-test('one press plays the throw and queues a light reminder', async () => {
+test('one press plays the throw and asks the host for a light reminder', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 
 	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	assert.equal(plugin.tomatoKey.querySelector('.dtt-badge').textContent, '1');
-	assert.equal(plugin.calls.prompt.length, 0, 'the reminder waits for the streak window');
+	assert.equal(plugin.hostCalls.length, 0, 'the reminder waits for the streak window');
 
 	await sleep(1150);
-	assert.equal(plugin.calls.prompt.length, 1);
-	assert.equal(plugin.calls.prompt[0].mode, 'queue');
-	assert.match(plugin.calls.prompt[0].content[0].text, /扔番茄/);
-	assert.match(plugin.calls.prompt[0].content[0].text, /ask_user_question/);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.equal(plugin.hostCalls[0].url, '/_dsh/throwtomatoes/throw');
+	assert.deepEqual(
+		{ sessionId: plugin.hostCalls[0].body.sessionId, hits: plugin.hostCalls[0].body.hits, heavy: plugin.hostCalls[0].body.heavy },
+		{ sessionId: 'session-test', hits: 1, heavy: false },
+	);
+	assert.equal(plugin.calls.prompt.length, 0, 'the visible composer path must stay unused');
 	assert.equal(plugin.calls.cancel, 0, 'a light throw must not stop the running turn');
 	assert.ok(plugin.layer() !== null, 'the effect layer must exist after a throw');
 });
 
-test('three rapid presses stop the turn first, then deliver the heavy reminder', async () => {
+test('three rapid presses ask the host for the interrupting heavy reminder', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 
 	const click = () => plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	click();
 	click();
 	click();
-	assert.equal(plugin.calls.cancel, 1, 'the heavy throw stops the running turn');
-	await sleep(80);
-	assert.equal(plugin.calls.prompt.length, 1);
-	assert.equal(plugin.calls.prompt[0].mode, 'queue');
-	assert.match(plugin.calls.prompt[0].content[0].text, /已经中断/);
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.equal(plugin.hostCalls[0].body.heavy, true);
+	assert.equal(plugin.hostCalls[0].body.hits, 3);
+	assert.equal(plugin.calls.cancel, 0, 'interrupting is the host half responsibility');
+	assert.equal(plugin.calls.prompt.length, 0);
 });
 
 test('the tomato key can be used more than once in a conversation', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 
 	const click = () => plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	click();
 	await sleep(1150);
 	click();
 	await sleep(1150);
-	assert.equal(plugin.calls.prompt.length, 2);
+	assert.equal(plugin.hostCalls.length, 2);
 	assert.equal(plugin.dom.window.localStorage.getItem('dsh-throwtomatoes:count:v1'), '2');
 });
 
 test('respects the effects switch', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '', settings: { effects: false, sound: false } });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
-	await sleep(30);
+	await sleep(40);
 	assert.equal(plugin.layer(), null, 'no effect layer when effects are disabled');
 	assert.equal(plugin.tomatoKey.querySelector('.dtt-badge').textContent, '1', 'the press still counts');
 });
@@ -345,19 +426,101 @@ test('respects the effects switch', async () => {
 test('resolves the session from the conversation DOM when no sessionId prop arrives', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '', sessionAttr: 'session-from-dom', seatProps: {} });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	assert.equal(plugin.tomatoKey.dataset.visible, 'true', 'the key still reveals itself without the prop');
 	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
 	await sleep(1150);
-	assert.equal(plugin.calls.prompt.length, 1, 'the reminder still reaches a session');
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.equal(plugin.hostCalls[0].body.sessionId, 'session-from-dom');
 });
 
 test('falls back to the composer corner when the primary key cannot be located', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '', misplacedPrimary: true });
 	active = plugin;
-	await sleep(30);
+	await sleep(60);
 	assert.equal(plugin.tomatoKey.dataset.visible, 'true');
 	assert.equal(plugin.tomatoKey.style.left, '778px');
 	assert.equal(plugin.tomatoKey.style.top, '508px');
 	assert.equal(plugin.tomatoKey.style.width, '34px');
+});
+
+test('falls back to the visible composer path when the host bridge is unreachable', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '', failFetch: true });
+	active = plugin;
+	await sleep(60);
+	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(1150);
+	assert.equal(plugin.hostCalls.length, 1, 'the bridge was attempted');
+	assert.equal(plugin.calls.prompt.length, 1, 'the visible fallback still delivers the reminder');
+	assert.equal(plugin.calls.prompt[0].mode, 'queue');
+	assert.match(plugin.calls.prompt[0].content[0].text, /扔番茄/);
+});
+
+/* ------------------------------------------------------------------ */
+/* Host half                                                           */
+/* ------------------------------------------------------------------ */
+
+const hostModule = await import(pathToFileURL(hostPath).href);
+
+test('host: registers one POST route under the plugin prefix', () => {
+	const harness = hostHarness();
+	hostModule.apply(harness.ctx);
+	assert.equal(harness.routed.length, 1);
+	assert.equal(harness.routed[0].kind, 'prefix');
+	assert.equal(harness.routed[0].path, '/_dsh/throwtomatoes');
+});
+
+test('host: a light throw queues an invisible runtime-context notice', async () => {
+	const harness = hostHarness({ running: true });
+	hostModule.apply(harness.ctx);
+	const result = await callHost(harness, 'POST', '/_dsh/throwtomatoes/throw', { sessionId: 'session-host', hits: 1, heavy: false });
+	assert.equal(result.status, 200);
+	assert.deepEqual(result.body, { ok: true, heavy: false, stopped: false });
+	assert.equal(harness.agent.cancelled.length, 0, 'a light throw must not interrupt the turn');
+	assert.equal(harness.agent.messages.length, 1);
+	const message = harness.agent.messages[0];
+	assert.equal(message.role, 'user');
+	assert.equal(message.source.kind, 'runtime-context');
+	assert.equal(message.source.form, 'notice');
+	assert.match(message.content[0].text, /扔番茄/);
+	assert.match(message.content[0].text, /ask_user_question/);
+	assert.match(message.content[0].text, /不该这么做/);
+});
+
+test('host: a heavy throw interrupts the turn before delivering the notice', async () => {
+	const harness = hostHarness({ running: true });
+	hostModule.apply(harness.ctx);
+	const result = await callHost(harness, 'POST', '/_dsh/throwtomatoes/throw', { sessionId: 'session-host', hits: 3, heavy: true });
+	assert.equal(result.status, 200);
+	assert.deepEqual(result.body, { ok: true, heavy: true, stopped: true });
+	assert.deepEqual(harness.agent.cancelled, [{ cause: { kind: 'user' }, options: { keepInbox: true } }]);
+	assert.equal(harness.agent.messages.length, 1);
+	assert.match(harness.agent.messages[0].content[0].text, /已经强行中断/);
+});
+
+test('host: rejects an unknown session, a bad body and a wrong method', async () => {
+	const harness = hostHarness();
+	hostModule.apply(harness.ctx);
+
+	const unknown = await callHost(harness, 'POST', '/_dsh/throwtomatoes/throw', { sessionId: 'nope', hits: 1 });
+	assert.equal(unknown.status, 409);
+	assert.equal(unknown.body.error, 'agent-unavailable');
+
+	const bad = await callHost(harness, 'POST', '/_dsh/throwtomatoes/throw', { sessionId: 'session-host', hits: 0 });
+	assert.equal(bad.status, 400);
+
+	const wrongMethod = await callHost(harness, 'GET', '/_dsh/throwtomatoes/throw');
+	assert.equal(wrongMethod.status, 405);
+
+	const wrongPath = await callHost(harness, 'POST', '/_dsh/throwtomatoes/other', {});
+	assert.equal(wrongPath.status, 404);
+});
+
+test('host: an idle agent still receives the notice without a cancel', async () => {
+	const harness = hostHarness({ running: false });
+	hostModule.apply(harness.ctx);
+	const result = await callHost(harness, 'POST', '/_dsh/throwtomatoes/throw', { sessionId: 'session-host', hits: 2, heavy: false });
+	assert.equal(result.status, 200);
+	assert.equal(harness.agent.cancelled.length, 0);
+	assert.equal(harness.agent.messages.length, 1);
 });
