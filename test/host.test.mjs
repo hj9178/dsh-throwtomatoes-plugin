@@ -32,6 +32,9 @@ function makeAgent({ id = 'session-1', status = 'running' } = {}) {
 		wakeDriver() {
 			calls.wake.push(Date.now());
 			agent.status = 'running';
+			// The real loop opens the phase synchronously; a phase that stays idle
+			// means the wake was latched and would never be replayed.
+			agent.phase = { kind: 'running', turn: (agent.phase?.turn ?? 0) + 1, step: 0 };
 		},
 		whenIdle() {
 			return Promise.resolve();
@@ -226,6 +229,38 @@ test('the status handler retries the wake once the turn releases the loop', asyn
 	handlers.get('agent/status')[0]({ agent, status: 'idle' });
 	await settle();
 	assert.equal(agent.calls.wake.length, 1);
+});
+
+test('a maintenance phase retries the wake instead of stranding the reminder', async () => {
+	const agent = makeAgent({ status: 'idle' });
+	agent.phase = { kind: 'maintenance', turn: 1 };
+	const { route } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await sleep(40);
+	// A maintenance phase reads as idle but refuses the wake; its own replay is
+	// guarded by an inbox check that is false for us, so a timer must cover it.
+	assert.equal(agent.calls.wake.length, 0);
+
+	agent.phase = { kind: 'idle', turn: 1 };
+	await sleep(600);
+	assert.equal(agent.calls.wake.length, 1);
+});
+
+test('a wake that did not open a turn is retried', async () => {
+	const agent = makeAgent({ status: 'idle' });
+	let attempts = 0;
+	agent.wakeDriver = () => {
+		attempts += 1;
+		agent.calls.wake.push(Date.now());
+		if (attempts >= 2) {
+			agent.status = 'running';
+			agent.phase = { kind: 'running', turn: 2, step: 0 };
+		}
+	};
+	const { route } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await sleep(900);
+	assert.equal(attempts, 2);
 });
 
 test('a burst folds into one reminder that counts them all', async () => {
