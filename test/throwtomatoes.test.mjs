@@ -436,14 +436,15 @@ test('resolves the session from the conversation DOM when no sessionId prop arri
 	assert.equal(plugin.hostCalls[0].body.sessionId, 'session-from-dom');
 });
 
-test('falls back to the composer corner when the primary key cannot be located', async () => {
+test('never paints a key when the primary key cannot be located', async () => {
+	// 0.2.13 used to fall back to the composer's bottom-right corner here, which
+	// meant any layout it did not recognise still got a tomato painted over
+	// whatever button happened to live there. Not seeing the stop key is a
+	// reason to stay hidden, not a reason to pick another spot.
 	const plugin = await loadPlugin({ stop: true, draft: '', misplacedPrimary: true });
 	active = plugin;
 	await sleep(60);
-	assert.equal(plugin.tomatoKey.dataset.visible, 'true');
-	assert.equal(plugin.tomatoKey.style.left, '778px');
-	assert.equal(plugin.tomatoKey.style.top, '508px');
-	assert.equal(plugin.tomatoKey.style.width, '34px');
+	assert.equal(plugin.tomatoKey.dataset.visible, 'false');
 });
 
 test('an unreachable host bridge fails quietly instead of posting a visible message', async () => {
@@ -495,7 +496,7 @@ test('a throw follows the conversation the composer now shows', async () => {
 	assert.equal(plugin.hostCalls[0].body.sessionId, 'session-second');
 });
 
-test('the light shortcut throws at once, without waiting for the streak window', async () => {
+test('a shortcut press counts exactly like a tap: one press is one light throw', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
 	await sleep(60);
@@ -506,7 +507,7 @@ test('the light shortcut throws at once, without waiting for the streak window',
 		bubbles: true,
 		cancelable: true,
 	}));
-	await sleep(120);
+	await sleep(1150);
 	assert.equal(plugin.hostCalls.length, 1);
 	assert.deepEqual(
 		{ hits: plugin.hostCalls[0].body.hits, heavy: plugin.hostCalls[0].body.heavy },
@@ -515,25 +516,50 @@ test('the light shortcut throws at once, without waiting for the streak window',
 	assert.equal(plugin.calls.prompt.length, 0);
 });
 
-test('the hard shortcut asks for the interrupting reminder', async () => {
+test('three shortcut presses inside a second are the heavy throw', async () => {
 	const plugin = await loadPlugin({ stop: true, draft: '' });
 	active = plugin;
 	await sleep(60);
 
-	plugin.dom.window.document.dispatchEvent(new plugin.dom.window.KeyboardEvent('keydown', {
-		code: 'KeyS',
-		altKey: true,
-		shiftKey: true,
-		bubbles: true,
-		cancelable: true,
-	}));
-	await sleep(120);
-	assert.equal(plugin.hostCalls.length, 1);
+	const press = () => plugin.dom.window.document.dispatchEvent(
+		new plugin.dom.window.KeyboardEvent('keydown', {
+			code: 'KeyS',
+			altKey: true,
+			bubbles: true,
+			cancelable: true,
+		}),
+	);
+	press();
+	press();
+	press();
+	await sleep(200);
+	assert.equal(plugin.hostCalls.length, 1, 'the third press flushes the batch');
 	assert.deepEqual(
 		{ hits: plugin.hostCalls[0].body.hits, heavy: plugin.hostCalls[0].body.heavy },
 		{ hits: 3, heavy: true },
 	);
 	assert.equal(plugin.calls.cancel, 0, 'stopping belongs to the host half');
+});
+
+test('the shortcut stays silent while the model is idle or the draft has text', async () => {
+	const idle = await loadPlugin({ stop: false, draft: '' });
+	active = idle;
+	await sleep(60);
+	idle.dom.window.document.dispatchEvent(new idle.dom.window.KeyboardEvent('keydown', {
+		code: 'KeyS', altKey: true, bubbles: true, cancelable: true,
+	}));
+	await sleep(1150);
+	assert.equal(idle.hostCalls.length, 0, 'nothing may be thrown while the send key is showing');
+	idle.dispose();
+
+	const typing = await loadPlugin({ stop: true, draft: 'hello' });
+	active = typing;
+	await sleep(60);
+	typing.dom.window.document.dispatchEvent(new typing.dom.window.KeyboardEvent('keydown', {
+		code: 'KeyS', altKey: true, bubbles: true, cancelable: true,
+	}));
+	await sleep(1150);
+	assert.equal(typing.hostCalls.length, 0, 'a draft in progress means the user is not throwing');
 });
 
 test('every other chord is left to the app', async () => {
@@ -547,15 +573,18 @@ test('every other chord is left to the app', async () => {
 	press({ code: 'KeyS' });
 	press({ code: 'KeyK', altKey: true });
 	press({ code: 'KeyS', altKey: true, ctrlKey: true });
+	// The hard throw no longer has its own chord: Alt+Shift+S is unbound on
+	// purpose, so pressing it is left to the app like any other chord.
+	press({ code: 'KeyS', altKey: true, shiftKey: true });
 	await sleep(120);
 	assert.equal(plugin.hostCalls.length, 0, 'no throw for a bare key, an unbound chord or a browser chord');
 });
 
-test('the shortcuts follow the bindings saved in settings', async () => {
+test('the shortcut follows the binding saved in settings', async () => {
 	const plugin = await loadPlugin({
 		stop: true,
 		draft: '',
-		settings: { effects: true, sound: false, lightKey: 'alt+shift|KeyK', heavyKey: 'alt|KeyT' },
+		settings: { effects: true, sound: false, lightKey: 'alt+shift|KeyK' },
 	});
 	active = plugin;
 	await sleep(60);
@@ -564,16 +593,13 @@ test('the shortcuts follow the bindings saved in settings', async () => {
 		new plugin.dom.window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
 	);
 	press({ code: 'KeyS', altKey: true });
-	await sleep(60);
+	await sleep(120);
 	assert.equal(plugin.hostCalls.length, 0, 'the default Alt+S is no longer bound');
 	press({ code: 'KeyK', altKey: true, shiftKey: true });
-	await sleep(120);
+	await sleep(1150);
 	assert.equal(plugin.hostCalls.length, 1);
 	assert.equal(plugin.hostCalls[0].body.hits, 1);
-	press({ code: 'KeyT', altKey: true });
-	await sleep(120);
-	assert.equal(plugin.hostCalls.length, 2);
-	assert.equal(plugin.hostCalls[1].body.heavy, true);
+	assert.equal(plugin.hostCalls[0].body.heavy, false, 'one press stays light even on a rebind');
 });
 
 test('the intensity setting scales the shake and the splatter together', async () => {
