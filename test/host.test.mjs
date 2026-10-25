@@ -1,7 +1,8 @@
 /**
- * Host-half tests: the tomato bridge must merge its reminder into the next
- * model request instead of appending a session event, and a heavy throw must
- * interrupt the running turn first.
+ * Host-half tests: a tomato press must hand the loop a reminder for its next
+ * turn — never a composer prompt — and a heavy throw must interrupt the running
+ * turn first. The reminder has to stay invisible to the browser: its source kind
+ * is what keeps it out of the rendered conversation.
  */
 
 import { test } from 'node:test';
@@ -13,30 +14,26 @@ import * as host from '../lib/index.js';
 const ROUTE = '/_dsh/throwtomatoes';
 
 /** Fake agent that records what the host half asks of it. */
-function makeAgent({ id = 'session-1', status = 'running', idle = true } = {}) {
-	const calls = { cancel: [], wake: [], followup: 0, prompt: 0 };
+function makeAgent({ id = 'session-1', status = 'running' } = {}) {
+	const calls = { cancel: [], messages: [], removed: [] };
 	const agent = {
 		id,
 		session: { id },
 		status,
-		// The agent loop reads `step = phase.step + 1` right before the pre-step
-		// hook, so a first-step hook sees `{ turn, step: 1 }` against step 0 here.
 		phase: { kind: status === 'running' ? 'running' : 'idle', turn: 1, step: 0 },
 		calls,
+		// Default inbox: the note is still waiting, so a later press can fold in.
+		inbox: {
+			remove(noteId) {
+				calls.removed.push(noteId);
+				return true;
+			},
+		},
 		cancel(cause, options) {
 			calls.cancel.push({ cause, options });
 		},
-		wakeDriver() {
-			calls.wake.push(Date.now());
-			// The real driver opens a turn synchronously, so the agent reads as
-			// running the moment the wake is accepted.
-			agent.status = 'running';
-		},
-		whenIdle() {
-			return idle ? Promise.resolve() : new Promise(() => {});
-		},
-		followup() {
-			calls.followup += 1;
+		followup(message) {
+			calls.messages.push(message);
 		},
 	};
 	return agent;
@@ -45,7 +42,6 @@ function makeAgent({ id = 'session-1', status = 'running', idle = true } = {}) {
 /** Minimal harness around `apply(ctx)`. */
 function mount(agent) {
 	const routes = [];
-	const handlers = new Map();
 	const agents = new Map();
 	if (agent !== undefined) agents.set(agent.id, agent);
 	const ctx = {
@@ -61,17 +57,14 @@ function mount(agent) {
 			if (name === 'agents') return { get: (id) => agents.get(id) };
 			return undefined;
 		},
-		on(event, fn, options) {
-			handlers.set(event, { fn, options });
-			return () => {};
+		on() {
+			throw new Error('the host half must not register agent hooks any more');
 		},
 		effect() {},
 		logger: { warn() {}, info() {}, debug() {} },
 	};
 	host.apply(ctx);
-	const route = routes[0];
-	const preStep = handlers.get('agent/pre-step');
-	return { route, preStep, ctx };
+	return { route: routes[0], ctx };
 }
 
 /** Drive one POST through the registered handler. */
@@ -100,143 +93,119 @@ function post(route, body) {
 	return { res, done };
 }
 
-/**
- * Run the registered pre-step waterfall once.
- *
- * The loop calls it with `{ messages, turn, step, signal }`, and the agent
- * dispatcher fuses `agent` into every agent event, so the handler really does
- * see the agent that is entering the step.
- */
-async function step(preStep, agent, messages = [], position = { turn: 1, step: 1 }) {
-	const next = () => Promise.resolve({ kind: 'enter', messages });
-	return preStep.fn({ messages, ...position, agent, signal: { aborted: false } }, next);
-}
+/** Let the handler's body read settle. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-test('registers one prefix route and the pre-step hook', () => {
-	const { route, preStep } = mount(makeAgent());
+test('registers one prefix route and no agent hooks', () => {
+	const { route } = mount(makeAgent());
 	assert.equal(route.kind, 'prefix');
 	assert.equal(route.path, ROUTE);
 	assert.equal(typeof route.handler, 'function');
-	assert.ok(preStep !== undefined);
-	assert.equal(preStep.options?.prepend, true);
 });
 
-test('a light throw arms a request-visible reminder without sending a user prompt', async () => {
+test('a light throw hands the loop an invisible reminder for its next turn', async () => {
 	const agent = makeAgent({ status: 'running' });
-	const { route, preStep } = mount(agent);
+	const { route } = mount(agent);
 	const { res } = post(route, { sessionId: agent.id, hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(res.statusCode, 200);
 	assert.deepEqual(res.body(), { ok: true, heavy: false, stopped: false });
 	assert.equal(agent.calls.cancel.length, 0, 'light throw must not interrupt');
-	assert.equal(agent.calls.followup, 0, 'the notice must not be sent as a user message');
+	assert.equal(agent.calls.messages.length, 1);
 
-	const decision = await step(preStep, agent);
-	assert.equal(decision.messages.length, 1);
-	const injected = decision.messages[0];
-	assert.equal(injected.role, 'user');
+	const message = agent.calls.messages[0];
+	assert.equal(message.role, 'user');
 	// `runtime-context` is the one kind the agent loop drops before building the
 	// request, so the reminder must never use it.
-	assert.notEqual(injected.source.kind, 'runtime-context');
-	assert.equal(injected.source.kind, 'dsh-throwtomatoes');
-	assert.equal(injected.source.form, 'notice');
-	assert.equal(typeof injected.id, 'string');
-	assert.match(injected.content[0].text, /扔番茄/);
-	assert.match(injected.content[0].text, /ask_user_question/);
+	assert.notEqual(message.source.kind, 'runtime-context');
+	assert.equal(message.source.kind, 'dsh-throwtomatoes');
+	assert.equal(message.source.form, 'notice');
+	assert.equal(typeof message.id, 'string');
+	assert.equal(typeof message.time, 'number');
+	assert.match(message.content[0].text, /扔番茄/);
+	assert.match(message.content[0].text, /ask_user_question/);
 });
 
-test('the reminder is one-shot: the following step carries nothing extra', async () => {
-	const agent = makeAgent();
-	const { route, preStep } = mount(agent);
-	post(route, { sessionId: agent.id, hits: 2 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	const first = await step(preStep, agent);
-	assert.equal(first.messages.length, 1);
-	const second = await step(preStep, agent);
-	assert.equal(second.messages.length, 0);
-});
-
-test('a heavy throw interrupts the running turn and restarts it with the reminder', async () => {
+test('a heavy throw interrupts the running turn and then hands over the reminder', async () => {
 	const agent = makeAgent({ status: 'running' });
-	const { route, preStep } = mount(agent);
+	const { route } = mount(agent);
 	const { res } = post(route, { sessionId: agent.id, hits: 3 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(res.statusCode, 200);
 	assert.deepEqual(res.body(), { ok: true, heavy: true, stopped: true });
 	assert.equal(agent.calls.cancel.length, 1);
-	assert.equal(agent.calls.wake.length, 1, 'the interrupted turn is restarted so the model can reflect');
-	const decision = await step(preStep, agent);
-	assert.equal(decision.messages.length, 1);
-	assert.match(decision.messages[0].content[0].text, /已经强行中断/);
+	assert.deepEqual(agent.calls.cancel[0], {
+		cause: { kind: 'user' },
+		options: { keepInbox: true },
+	});
+	assert.equal(agent.calls.messages.length, 1);
+	assert.match(agent.calls.messages[0].content[0].text, /强行中断/);
 });
 
 test('a heavy throw on an idle agent does not fabricate a stop', async () => {
 	const agent = makeAgent({ status: 'idle' });
 	const { route } = mount(agent);
 	const { res } = post(route, { sessionId: agent.id, hits: 4 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(res.body().stopped, false);
 	assert.equal(agent.calls.cancel.length, 0);
-	assert.equal(agent.calls.wake.length, 1);
+	assert.equal(agent.calls.messages.length, 1);
+});
+
+test('a burst folds into the note that is still waiting', async () => {
+	const agent = makeAgent({ status: 'running' });
+	const { route } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await settle();
+	const first = agent.calls.messages[0];
+	post(route, { sessionId: agent.id, hits: 1 });
+	await settle();
+	// The earlier note is withdrawn so the model does not read two nearly
+	// identical reflections, and the presses are counted together.
+	assert.deepEqual(agent.calls.removed, [first.id]);
+	assert.equal(agent.calls.messages.length, 2);
+	assert.match(agent.calls.messages[1].content[0].text, /2 个番茄/);
+});
+
+test('a note the model already read is not folded into the next one', async () => {
+	const agent = makeAgent({ status: 'running' });
+	agent.inbox.remove = () => false;
+	const { route } = mount(agent);
+	post(route, { sessionId: agent.id, hits: 1 });
+	await settle();
+	post(route, { sessionId: agent.id, hits: 1 });
+	await settle();
+	assert.equal(agent.calls.messages.length, 2);
+	assert.match(agent.calls.messages[1].content[0].text, /一个番茄/);
 });
 
 test('the tomato feature can be used again in the same conversation', async () => {
 	const agent = makeAgent({ status: 'running' });
-	const { route, preStep } = mount(agent);
+	agent.inbox.remove = () => false;
+	const { route } = mount(agent);
 	for (const hits of [1, 1, 3]) {
 		post(route, { sessionId: agent.id, hits });
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		const decision = await step(preStep, agent);
-		assert.equal(decision.messages.length, 1, `throw ${hits} should inject once`);
+		await settle();
 	}
-	assert.equal(agent.calls.wake.length, 3);
+	assert.equal(agent.calls.messages.length, 3);
+	assert.match(agent.calls.messages[2].content[0].text, /强行中断/);
 });
 
-test('the reminder only lands on the armed agent, never on another turn', async () => {
-	const armed = makeAgent({ id: 'session-a' });
-	const other = makeAgent({ id: 'session-b' });
-	const { route, preStep } = mount(armed);
-	post(route, { sessionId: armed.id, hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	// A different conversation sitting at the same turn/step must not steal it.
-	const stolen = await step(preStep, other);
-	assert.equal(stolen.messages.length, 0);
-	// Another turn (e.g. a different conversation that happens to be at turn 7)
-	// must not claim it.
-	const elsewhere = await step(preStep, armed, [], { turn: 7, step: 1 });
-	assert.equal(elsewhere.messages.length, 0);
-	// A non-first step of the same turn must not claim it either.
-	const laterStep = await step(preStep, armed, [], { turn: 1, step: 2 });
-	assert.equal(laterStep.messages.length, 0);
-	// The armed turn still gets it afterwards.
-	const mine = await step(preStep, armed, [], { turn: 1, step: 1 });
-	assert.equal(mine.messages.length, 1);
-});
-
-test('a wake the loop cannot honour yet is retried', async () => {
-	const agent = makeAgent({ status: 'running' });
-	// First wake is refused (an abort still owns the phase), the second opens
-	// the turn. Without the retry the reminder would wait for a natural turn.
-	let refusals = 1;
-	agent.wakeDriver = () => {
-		agent.calls.wake.push(Date.now());
-		if (refusals > 0) {
-			refusals -= 1;
-			agent.status = 'idle';
-			return;
-		}
-		agent.status = 'running';
-	};
+test('an agent that cannot receive a follow-up is refused, not silently dropped', async () => {
+	const agent = makeAgent();
+	agent.followup = undefined;
+	agent.send = undefined;
 	const { route } = mount(agent);
-	post(route, { sessionId: agent.id, hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 700));
-	assert.ok(agent.calls.wake.length >= 2, 'the wake is retried until the turn opens');
+	const { res } = post(route, { sessionId: agent.id, hits: 1 });
+	await settle();
+	assert.equal(res.statusCode, 409);
+	assert.equal(res.body().error, 'agent-unavailable');
 });
 
 test('unknown session answers 409 instead of throwing', async () => {
 	const { route } = mount(undefined);
 	const { res } = post(route, { sessionId: 'nope', hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(res.statusCode, 409);
 	assert.equal(res.body().ok, false);
 	assert.equal(res.body().error, 'agent-unavailable');
@@ -245,7 +214,7 @@ test('unknown session answers 409 instead of throwing', async () => {
 test('malformed bodies are rejected and non-POST verbs are refused', async () => {
 	const { route } = mount(makeAgent());
 	const bad = post(route, { sessionId: '', hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(bad.res.statusCode, 400);
 
 	const getter = new EventEmitter();
@@ -253,38 +222,6 @@ test('malformed bodies are rejected and non-POST verbs are refused', async () =>
 	getter.url = `${ROUTE}/throw`;
 	const res = { statusCode: 0, writeHead(s) { this.statusCode = s; }, end() {} };
 	route.handler(getter, res);
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await settle();
 	assert.equal(res.statusCode, 405);
-});
-
-test('a second throw folds into the reminder that is still waiting', async () => {
-	const agent = makeAgent({ status: 'running' });
-	const { route, preStep } = mount(agent);
-	post(route, { sessionId: agent.id, hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
-	// A heavy throw lands before the model ever saw the light one: the second
-	// reminder must not overwrite the first promise (the model would otherwise
-	// get a mild note right after its turn had been killed).
-	post(route, { sessionId: agent.id, hits: 3 });
-	await new Promise((resolve) => setTimeout(resolve, 0));
-
-	const decision = await step(preStep, agent);
-	assert.equal(decision.messages.length, 1, 'only one reminder is delivered');
-	const text = decision.messages[0].content[0].text;
-	assert.match(text, /4 个番茄/, 'the presses are counted together');
-	assert.match(text, /中断/, 'the heavier flavour wins');
-});
-
-test('a waiting reminder is dropped once the loop cannot open a turn', async () => {
-	const agent = makeAgent({ status: 'running' });
-	// The wake is accepted by the API but the phase never opens (an abort keeps
-	// owning it). The retries give up and the reminder must not linger until the
-	// user's own next question picks it up.
-	agent.wakeDriver = () => { agent.calls.wake.push(Date.now()); };
-	const { route, preStep } = mount(agent);
-	post(route, { sessionId: agent.id, hits: 1 });
-	await new Promise((resolve) => setTimeout(resolve, 3400));
-
-	const decision = await step(preStep, agent, [], { turn: 2, step: 1 });
-	assert.equal(decision.messages.length, 0);
 });
