@@ -102,12 +102,14 @@ async function loadPlugin(options = {}) {
 	});
 
 	// jsdom has no Web Animations API; the plugin only needs the event surface.
+	// Splatter particles are deliberately left mid-flight so a test can count them.
 	dom.window.Element.prototype.animate = function animate() {
+		const node = this;
 		const listeners = new Map();
 		return {
 			addEventListener: (name, listener) => {
 				listeners.set(name, listener);
-				if (name === 'finish') {
+				if (name === 'finish' && !node.classList.contains('dtt-particle')) {
 					dom.window.setTimeout(() => {
 						const fn = listeners.get('finish');
 						if (fn) fn({ type: 'finish' });
@@ -572,4 +574,36 @@ test('the shortcuts follow the bindings saved in settings', async () => {
 	await sleep(120);
 	assert.equal(plugin.hostCalls.length, 2);
 	assert.equal(plugin.hostCalls[1].body.heavy, true);
+});
+
+test('the intensity setting scales the shake and the splatter together', async () => {
+	const soft = await loadPlugin({ stop: true, draft: '', settings: { effects: true, sound: false, intensity: 0 } });
+	active = soft;
+	await sleep(60);
+	soft.tomatoKey.dispatchEvent(new soft.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(60);
+	const softRoot = soft.dom.window.document.body;
+	assert.equal(softRoot.style.getPropertyValue('--dtt-shake'), '0.00px', 'zero strength must not shake the window');
+	assert.equal(soft.layer().querySelectorAll('.dtt-particle').length, 5, 'the lowest strength sprays the fewest particles');
+	// Two windows live in this one test, so the first has to go before the second
+	// starts: an undisposed window keeps its timers alive and stalls the runner.
+	soft.dispose();
+
+	const loud = await loadPlugin({ stop: true, draft: '', settings: { effects: true, sound: false, intensity: 100 } });
+	active = loud;
+	await sleep(60);
+	loud.tomatoKey.dispatchEvent(new loud.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(60);
+	const loudRoot = loud.dom.window.document.body;
+	assert.equal(loudRoot.style.getPropertyValue('--dtt-shake'), '9.00px', 'full strength shakes the window the most');
+	assert.equal(loud.layer().querySelectorAll('.dtt-particle').length, 16, 'full strength sprays the most particles');
+});
+
+test('an out-of-range intensity falls back to the ends of the slider', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '', settings: { effects: true, sound: false, intensity: 500 } });
+	active = plugin;
+	await sleep(60);
+	plugin.tomatoKey.dispatchEvent(new plugin.dom.window.MouseEvent('click', { bubbles: true }));
+	await sleep(60);
+	assert.equal(plugin.dom.window.document.body.style.getPropertyValue('--dtt-shake'), '9.00px');
 });
