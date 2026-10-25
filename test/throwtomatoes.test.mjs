@@ -492,3 +492,84 @@ test('a throw follows the conversation the composer now shows', async () => {
 	assert.equal(plugin.hostCalls.length, 1);
 	assert.equal(plugin.hostCalls[0].body.sessionId, 'session-second');
 });
+
+test('the light shortcut throws at once, without waiting for the streak window', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '' });
+	active = plugin;
+	await sleep(60);
+
+	plugin.dom.window.document.dispatchEvent(new plugin.dom.window.KeyboardEvent('keydown', {
+		code: 'KeyS',
+		altKey: true,
+		bubbles: true,
+		cancelable: true,
+	}));
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.deepEqual(
+		{ hits: plugin.hostCalls[0].body.hits, heavy: plugin.hostCalls[0].body.heavy },
+		{ hits: 1, heavy: false },
+	);
+	assert.equal(plugin.calls.prompt.length, 0);
+});
+
+test('the hard shortcut asks for the interrupting reminder', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '' });
+	active = plugin;
+	await sleep(60);
+
+	plugin.dom.window.document.dispatchEvent(new plugin.dom.window.KeyboardEvent('keydown', {
+		code: 'KeyS',
+		altKey: true,
+		shiftKey: true,
+		bubbles: true,
+		cancelable: true,
+	}));
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.deepEqual(
+		{ hits: plugin.hostCalls[0].body.hits, heavy: plugin.hostCalls[0].body.heavy },
+		{ hits: 3, heavy: true },
+	);
+	assert.equal(plugin.calls.cancel, 0, 'stopping belongs to the host half');
+});
+
+test('every other chord is left to the app', async () => {
+	const plugin = await loadPlugin({ stop: true, draft: '' });
+	active = plugin;
+	await sleep(60);
+
+	const press = (init) => plugin.dom.window.document.dispatchEvent(
+		new plugin.dom.window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+	);
+	press({ code: 'KeyS' });
+	press({ code: 'KeyK', altKey: true });
+	press({ code: 'KeyS', altKey: true, ctrlKey: true });
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 0, 'no throw for a bare key, an unbound chord or a browser chord');
+});
+
+test('the shortcuts follow the bindings saved in settings', async () => {
+	const plugin = await loadPlugin({
+		stop: true,
+		draft: '',
+		settings: { effects: true, sound: false, lightKey: 'alt+shift|KeyK', heavyKey: 'alt|KeyT' },
+	});
+	active = plugin;
+	await sleep(60);
+
+	const press = (init) => plugin.dom.window.document.dispatchEvent(
+		new plugin.dom.window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+	);
+	press({ code: 'KeyS', altKey: true });
+	await sleep(60);
+	assert.equal(plugin.hostCalls.length, 0, 'the default Alt+S is no longer bound');
+	press({ code: 'KeyK', altKey: true, shiftKey: true });
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 1);
+	assert.equal(plugin.hostCalls[0].body.hits, 1);
+	press({ code: 'KeyT', altKey: true });
+	await sleep(120);
+	assert.equal(plugin.hostCalls.length, 2);
+	assert.equal(plugin.hostCalls[1].body.heavy, true);
+});

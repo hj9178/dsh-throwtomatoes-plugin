@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** One agent double whose inbox behaves like the loop's pending lists. */
 function makeAgent({ id = 'session-host', status = 'running' } = {}) {
-	const calls = { inject: [], cancel: [], wake: [] };
+	const calls = { inject: [], cancel: [], wake: [], order: [] };
 	const pending = new Map();
 	const agent = {
 		id,
@@ -24,13 +24,24 @@ function makeAgent({ id = 'session-host', status = 'running' } = {}) {
 		},
 		inject(message) {
 			calls.inject.push(message);
+			calls.order.push('inject');
 			pending.set(message.id, message);
 		},
 		cancel(cause, options) {
 			calls.cancel.push({ cause, options });
+			calls.order.push('cancel');
 		},
-		wakeDriver() {
-			calls.wake.push(Date.now());
+		/** Mirrors `wakeDriver(wakeAfterAbort)`: a running loop only latches. */
+		wakeDriver(wakeAfterAbort = false) {
+			calls.wake.push({ wakeAfterAbort, at: Date.now() });
+			calls.order.push('wake');
+			if (agent.phase.kind !== 'idle') {
+				const latched = agent.phase.kind === 'maintenance' || wakeAfterAbort === true;
+				if (!latched) return;
+				agent.status = 'running';
+				agent.phase = { kind: 'running', turn: 2, step: 0 };
+				return;
+			}
 			agent.status = 'running';
 			agent.phase = { kind: 'running', turn: 2, step: 0 };
 		},
@@ -132,11 +143,13 @@ test('a light throw injects for the next step without interrupting', async () =>
 	assert.match(text, /ask_user_question/);
 });
 
-test('the note waits for the step in flight, so a running agent is not woken', async () => {
+test('a light throw asks for the boundary without latching past the running step', async () => {
 	const agent = makeAgent({ status: 'running' });
 	const { route } = mount(agent);
 	await post(route, { sessionId: agent.id, hits: 1 });
-	assert.equal(agent.calls.wake.length, 0);
+	assert.equal(agent.calls.wake.length, 1);
+	assert.equal(agent.calls.wake[0].wakeAfterAbort, false, 'a light throw must not wake past the abort');
+	assert.equal(agent.phase.step, 1, 'the step in flight keeps running');
 });
 
 test('an idle agent is woken, because no step boundary exists to carry it', async () => {
@@ -145,9 +158,10 @@ test('an idle agent is woken, because no step boundary exists to carry it', asyn
 	await post(route, { sessionId: agent.id, hits: 1 });
 	assert.equal(agent.calls.inject.length, 1);
 	assert.equal(agent.calls.wake.length, 1);
+	assert.equal(agent.status, 'running');
 });
 
-test('a heavy throw interrupts the running step first', async () => {
+test('a heavy throw injects, arms the wake past the abort, then stops the step', async () => {
 	const agent = makeAgent({ status: 'running' });
 	const { route } = mount(agent);
 	const state = await post(route, { sessionId: agent.id, hits: 3 });
@@ -156,6 +170,11 @@ test('a heavy throw interrupts the running step first', async () => {
 	assert.equal(state.body.stopped, true);
 	assert.deepEqual(agent.calls.cancel, [{ cause: { kind: 'user' }, options: { keepInbox: true } }]);
 	assert.equal(agent.calls.inject.length, 1);
+	// The note has to be in the inbox before the wake is armed, and the abort has
+	// to come last: `kick`'s finally only replays a latched wake, and the abort
+	// is what ends the turn the note could no longer ride.
+	assert.deepEqual(agent.calls.order, ['inject', 'wake', 'cancel']);
+	assert.equal(agent.calls.wake[0].wakeAfterAbort, true, 'the wake must survive the abort');
 	const text = agent.calls.inject[0].content.map((block) => block.text).join('\n');
 	assert.match(text, /已经强行中断/);
 });
