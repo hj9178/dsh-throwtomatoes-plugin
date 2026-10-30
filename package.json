@@ -1,7 +1,7 @@
 {
   "name": "dsh-throwtomatoes-plugin",
-  "version": "0.2.15",
-  "description": "Throw tomatoes at a running DeepSeek Harness task: while the model works and the composer is empty, the send key becomes a tomato key, and Alt+S or Alt+Shift+S (both rebindable) hand the model a hidden note on its next step asking it to reflect - the hard throw stops the run first - and neither adds a visible message to the conversation.",
+  "version": "0.2.16",
+  "description": "Throw tomatoes at a running DeepSeek Harness task: while the model works and the composer is empty, the send key becomes a tomato key, and a press (or Alt+S, rebindable, or three quick presses for the hard one) hands the model a hidden note on its next step asking it to reflect - the hard throw stops the run first - and neither adds a visible message to the conversation.",
   "type": "module",
   "main": "./lib/index.js",
   "repository": {
@@ -41,9 +41,10 @@
       "platform": "web"
     },
     "compatibility": {
-      "dsh": "0.2.1-rc.2",
+      "dsh": ">=0.2.1-rc.2 <0.3.0",
       "dshReleases": {
-        "0.2.1-rc.2": "compatible"
+        "0.2.1-rc.2": "compatible",
+        "0.2.1-rc.5": "compatible"
       }
     }
   },
